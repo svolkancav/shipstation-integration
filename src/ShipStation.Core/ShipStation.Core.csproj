@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>ShipStation.Core</RootNamespace>
+    <Description>Domain entities and enums. No dependencies on the other layers.</Description>
+  </PropertyGroup>
+
+</Project>

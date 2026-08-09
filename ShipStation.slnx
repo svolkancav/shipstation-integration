@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ShipStation.API/ShipStation.API.csproj" />
+    <Project Path="src/ShipStation.Application/ShipStation.Application.csproj" />
+    <Project Path="src/ShipStation.Core/ShipStation.Core.csproj" />
+    <Project Path="src/ShipStation.DataAccess/ShipStation.DataAccess.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ShipStation.Tests/ShipStation.Tests.csproj" />
+  </Folder>
+</Solution>

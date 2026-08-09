@@ -33,21 +33,30 @@ actually decide whether a sync survives contact with production are elsewhere:
 
 ## Layout
 
+Four layers, the same split used across the services this was extracted from:
+
 ```
 src/
-  ShipStation.Integration/         client library — no ASP.NET dependency
-    Authentication/                Basic auth handler
-    Http/                          rate limiting, retry policy, error type
-    Models/                        wire contracts
-    Orders/                        the order client and its request/query types
-  ShipStation.Integration.Persistence/
-    Entities/                      the stored shape
-    Upsert/                        SQL builder + batched store
-    Sync/                          fetch -> add-or-update
-  ShipStation.Integration.Api/     minimal API that exercises the client
+  ShipStation.Core/          entities and enums — depends on nothing
+    Entities/                ShipStationOrder
+    Enums/                   OrderStatus
+  ShipStation.DataAccess/    EF Core over PostgreSQL
+    AppDatabaseContext.cs
+    Repositories/            interfaces
+    Repositories/Impl/       implementations
+  ShipStation.Application/   the integration itself
+    Configuration/           options + validation
+    Http/                    auth handler, rate limiting, retry policy, error type
+    Models/                  wire contracts and queries
+    Services/                the API client and the sync orchestration
+    MappingProfiles/         AutoMapper: wire model -> entity
+  ShipStation.API/           controllers, DI wiring, problem details
 tests/
-  ShipStation.Integration.Tests/   42 tests, no network
+  ShipStation.Tests/         39 tests, no network and no database server
 ```
+
+Dependencies point inward: `API -> Application -> DataAccess -> Core`. Core references
+nothing, so the domain can be tested and reused without dragging EF or HTTP along.
 
 ## Usage
 
@@ -124,7 +133,7 @@ dotnet user-secrets set "ShipStation:ApiSecret" "…" --project src/ShipStation.
 ## Running
 
 ```bash
-dotnet test                                     # 42 tests, no network access
+dotnet test                                     # 39 tests, no network access
 dotnet run --project src/ShipStation.Integration.Api
 ```
 
@@ -135,58 +144,69 @@ status code — a caller retrying on 429 needs to see the 429, not a 500.
 
 ## Persisting what you fetch
 
-Fetching is half the job. `*.Persistence` adds a PostgreSQL store with a batched
-**add-or-update**: rows that are new get inserted, rows that changed get updated, and
-rows that match what is already stored are left completely alone.
+Fetching is half the job. `ShipStation.DataAccess` stores orders in PostgreSQL through
+EF Core with a batched **add-or-update**: new orders are inserted, changed ones updated,
+and orders that came back identical are left completely alone.
 
 ```csharp
-builder.Services.AddShipStationPersistence(builder.Configuration);
+builder.Services
+    .AddDataAccess(builder.Configuration)
+    .AddApplication(builder.Configuration)
+    .AddServices()
+    .RegisterProfiles();
 
-var result = await sync.SyncAsync(since, ct);
+var result = await sync.SyncAsync();          // resumes from the stored watermark
 // 120 inserted, 43 updated, 8017 unchanged
 ```
 
-It is one `INSERT … ON CONFLICT (order_id) DO UPDATE` per batch, not a read-then-write
-loop, so a page of 500 costs one round trip instead of a thousand.
+The repository loads a batch's existing rows in one query, then hands each incoming
+order to the change tracker:
+
+```csharp
+if (stored.TryGetValue(incoming.OrderId, out var existing))
+    context.Entry(existing).CurrentValues.SetValues(incoming);
+else
+    await context.ShipStationOrders.AddAsync(incoming, cancellationToken);
+```
+
+`SetValues` copies the scalars and lets EF work out what actually differs — an order that
+came back unchanged produces **no UPDATE statement at all**, so a nightly re-sync does not
+rewrite rows it did not need to touch. The insert/update/unchanged split is read off
+`ChangeTracker` before `SaveChanges`, which is also what the endpoint returns.
 
 Four things that are easy to get wrong and are handled here:
 
-**The same row twice in one statement.** PostgreSQL rejects an `ON CONFLICT DO UPDATE`
-that affects a row more than once — *"cannot affect row a second time"*. A record edited
-mid-pagination legitimately appears on two consecutive pages, so the batch is
-de-duplicated by key first, keeping the most recently modified copy.
+**The same order twice in one batch.** A record modified mid-pagination legitimately comes
+back on two consecutive pages. Both copies would land in the change tracker under one key
+and EF throws on the second add, so the batch is de-duplicated first, keeping the most
+recently modified copy.
 
-**Rewriting rows that did not change.** The update carries a
-`WHERE shipstation_orders.modify_date IS DISTINCT FROM EXCLUDED.modify_date` guard. Without it a
-nightly re-sync rewrites every row it touches, churning WAL and leaving dead tuples for
-autovacuum. `synced_at` is deliberately excluded from that comparison — it always differs,
-and including it would defeat the guard entirely.
+**Unbounded change tracking.** `ChangeTracker.Clear()` runs between batches. Without it a
+backfill keeps every entity it has ever seen alive for the length of the job.
 
-**Not knowing what happened.** `RETURNING (xmax = 0) AS inserted` distinguishes inserts
-from updates in the same statement — `xmax` is zero only on a freshly inserted tuple.
-Rows filtered out by the guard are not returned at all, which is exactly how they get
-counted as unchanged. On a healthy steady-state sync, *unchanged* should dominate; if it
-does not, change detection is broken and the job is burning I/O for nothing.
+**Enums stored as integers.** `OrderStatus` is converted to its name. Storing the ordinal
+couples the column to declaration order — reorder the enum and every stored row silently
+changes meaning.
 
-**The 65535-parameter ceiling.** The PostgreSQL wire protocol caps a statement's
-parameters, so batches are chunked against that limit rather than assuming a page fits.
-The sync service flushes every 500 records instead of accumulating — a backfill of a few
-hundred thousand rows should not be held in memory to be written once.
+**A watermark with no overlap.** Resuming from the exact last `ModifyDate` drops orders
+written during the previous run's final second. The watermark is rewound a minute; the
+re-read costs nothing because those rows come back as unchanged.
 
-The whole document is also kept in a `jsonb` column alongside the projected fields.
-Integrations acquire *"we also need field X"* requirements constantly, and re-syncing a
-year of history to backfill a column nobody modelled is worse than paying for the raw copy.
-
-The SQL builder is a pure function, so the emitted statement, its parameter binding and
-the batch limits are all asserted directly — no database needed in CI.
+Timestamps are stored as UTC `DateTime` rather than `DateTimeOffset` — ShipStation sends
+`modifyDate` without an offset, so carrying one would imply precision the source does not
+have.
 
 ```json
 {
   "ConnectionStrings": {
-    "ShipStation": "Host=localhost;Database=shipstation;Username=<USER>;Password=<PASSWORD>"
+    "ShipStation": "Host=localhost;Port=5432;Database=shipstation;Username=<DB_USER>;Password=<DB_PASSWORD>"
   }
 }
 ```
+
+The repository tests run against SQLite in memory rather than a mock: the behaviour under
+test is what EF decides to write, and a mocked context cannot tell you whether an unchanged
+entity would have produced an UPDATE.
 
 ## Notes on scope
 

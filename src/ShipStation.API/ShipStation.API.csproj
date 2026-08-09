@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <RootNamespace>ShipStation.API</RootNamespace>
+    <UserSecretsId>shipstation-integration-sample</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Scalar.AspNetCore" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ShipStation.Application\ShipStation.Application.csproj" />
+    <ProjectReference Include="..\ShipStation.DataAccess\ShipStation.DataAccess.csproj" />
+  </ItemGroup>
+
+</Project>

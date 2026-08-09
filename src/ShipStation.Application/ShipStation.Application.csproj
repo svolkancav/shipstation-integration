@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>ShipStation.Application</RootNamespace>
+    <Description>Application layer: the ShipStation HTTP client, transport policies and the sync orchestration.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AutoMapper" />
+    <PackageReference Include="Microsoft.Extensions.Http" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" />
+    <PackageReference Include="Microsoft.Extensions.Options.DataAnnotations" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ShipStation.Core\ShipStation.Core.csproj" />
+    <ProjectReference Include="..\ShipStation.DataAccess\ShipStation.DataAccess.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ShipStation.Tests" />
+  </ItemGroup>
+
+</Project>
