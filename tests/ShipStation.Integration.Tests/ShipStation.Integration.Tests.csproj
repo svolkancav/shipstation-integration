@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ShipStation.Integration\ShipStation.Integration.csproj" />
+    <ProjectReference Include="..\..\src\ShipStation.Integration.Persistence\ShipStation.Integration.Persistence.csproj" />
   </ItemGroup>
 
 </Project>

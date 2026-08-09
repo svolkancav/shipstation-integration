@@ -40,9 +40,13 @@ src/
     Http/                          rate limiting, retry policy, error type
     Models/                        wire contracts
     Orders/                        the order client and its request/query types
+  ShipStation.Integration.Persistence/
+    Entities/                      the stored shape
+    Upsert/                        SQL builder + batched store
+    Sync/                          fetch -> add-or-update
   ShipStation.Integration.Api/     minimal API that exercises the client
 tests/
-  ShipStation.Integration.Tests/   29 tests, no network
+  ShipStation.Integration.Tests/   42 tests, no network
 ```
 
 ## Usage
@@ -120,7 +124,7 @@ dotnet user-secrets set "ShipStation:ApiSecret" "…" --project src/ShipStation.
 ## Running
 
 ```bash
-dotnet test                                     # 29 tests, no network access
+dotnet test                                     # 42 tests, no network access
 dotnet run --project src/ShipStation.Integration.Api
 ```
 
@@ -128,6 +132,61 @@ The sample API exposes `GET /api/orders`, `GET /api/orders/stream`, `POST /api/o
 and `DELETE /api/orders/{orderId}`, with API docs at `/scalar` in development.
 Upstream failures are translated to `ProblemDetails` that preserve the original
 status code — a caller retrying on 429 needs to see the 429, not a 500.
+
+## Persisting what you fetch
+
+Fetching is half the job. `*.Persistence` adds a PostgreSQL store with a batched
+**add-or-update**: rows that are new get inserted, rows that changed get updated, and
+rows that match what is already stored are left completely alone.
+
+```csharp
+builder.Services.AddShipStationPersistence(builder.Configuration);
+
+var result = await sync.SyncAsync(since, ct);
+// 120 inserted, 43 updated, 8017 unchanged
+```
+
+It is one `INSERT … ON CONFLICT (order_id) DO UPDATE` per batch, not a read-then-write
+loop, so a page of 500 costs one round trip instead of a thousand.
+
+Four things that are easy to get wrong and are handled here:
+
+**The same row twice in one statement.** PostgreSQL rejects an `ON CONFLICT DO UPDATE`
+that affects a row more than once — *"cannot affect row a second time"*. A record edited
+mid-pagination legitimately appears on two consecutive pages, so the batch is
+de-duplicated by key first, keeping the most recently modified copy.
+
+**Rewriting rows that did not change.** The update carries a
+`WHERE shipstation_orders.modify_date IS DISTINCT FROM EXCLUDED.modify_date` guard. Without it a
+nightly re-sync rewrites every row it touches, churning WAL and leaving dead tuples for
+autovacuum. `synced_at` is deliberately excluded from that comparison — it always differs,
+and including it would defeat the guard entirely.
+
+**Not knowing what happened.** `RETURNING (xmax = 0) AS inserted` distinguishes inserts
+from updates in the same statement — `xmax` is zero only on a freshly inserted tuple.
+Rows filtered out by the guard are not returned at all, which is exactly how they get
+counted as unchanged. On a healthy steady-state sync, *unchanged* should dominate; if it
+does not, change detection is broken and the job is burning I/O for nothing.
+
+**The 65535-parameter ceiling.** The PostgreSQL wire protocol caps a statement's
+parameters, so batches are chunked against that limit rather than assuming a page fits.
+The sync service flushes every 500 records instead of accumulating — a backfill of a few
+hundred thousand rows should not be held in memory to be written once.
+
+The whole document is also kept in a `jsonb` column alongside the projected fields.
+Integrations acquire *"we also need field X"* requirements constantly, and re-syncing a
+year of history to backfill a column nobody modelled is worse than paying for the raw copy.
+
+The SQL builder is a pure function, so the emitted statement, its parameter binding and
+the batch limits are all asserted directly — no database needed in CI.
+
+```json
+{
+  "ConnectionStrings": {
+    "ShipStation": "Host=localhost;Database=shipstation;Username=<USER>;Password=<PASSWORD>"
+  }
+}
+```
 
 ## Notes on scope
 
